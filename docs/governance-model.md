@@ -39,12 +39,39 @@ through untouched.
 |---|---|---|
 | `full` | Cleartext | Owners, break-glass roles; each read logged as sensitive |
 | `partial` | `a***@***` / `12***34` | Analysts who need shape, not value |
-| `hash` | Deterministic `hash:<12 hex>` | Joins and dedup without reversibility |
+| `hash` | Keyed HMAC-SHA256 pseudonym `hmac:<key id>:<16 hex>` | Joins and dedup; not reversible without the key |
 | `deny` | Column removed | Roles with no business need |
 
 The default policy for a PII column with no explicit rule is `deny` — the
 safe direction. Switching a column from `deny` to anything looser is a
 permission change and shows up in policy `diff()`.
+
+## Pseudonymisation key and rotation
+
+The `hash` policy is a keyed HMAC-SHA256, not a plain hash. A plain SHA-256
+of an email can be reversed by hashing a list of likely emails and comparing;
+without the key that is not possible.
+
+- **Where the key lives:** `DATAGOV_PSEUDONYM_KEY` in the environment (at least
+  16 bytes), or `MaskingEngine(pseudonym_key=...)`. In Azure this would be a Key
+  Vault secret read by a managed identity; it never goes into code, config files
+  or the audit log.
+- **Fail closed:** a `hash` policy with no key raises `MaskingError`; it never
+  falls back to an unkeyed hash.
+- **Key ID in the output:** pseudonyms look like `hmac:v1:3f2a...`, with the ID
+  from `DATAGOV_PSEUDONYM_KEY_ID` (default `v1`), so you can tell which key made
+  a value.
+
+Rotation procedure (planned for production, shown here as a runbook):
+
+1. Create the new key as a new Key Vault secret version, with a new key ID (`v2`).
+2. Re-pseudonymise derived tables that store pseudonyms, writing `hmac:v2:` values.
+   Joins between a `v1` and a `v2` table will not match until both are rebuilt;
+   the key ID makes that visible instead of silently failing.
+3. Switch readers to `v2`, keep `v1` only as long as the rebuild needs, then
+   disable it.
+4. Rotate on a schedule (for example yearly) and immediately if the key may have
+   leaked. Record each rotation as a policy change.
 
 ## Lineage semantics
 

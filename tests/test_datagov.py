@@ -2,11 +2,19 @@
 import pytest
 
 from datagov import (
-    AuditLog, Catalog, CatalogError, AccessManager, AccessError,
-    MaskingEngine, MaskingError, LineageTracker, LineageError,
-    PolicyBundle, PolicyError,
+    AccessError,
+    AccessManager,
+    AuditLog,
+    Catalog,
+    CatalogError,
+    LineageError,
+    LineageTracker,
+    MaskingEngine,
+    MaskingError,
+    PolicyBundle,
+    PolicyError,
 )
-from datagov.access import RULE_DEFAULT_DENY, RULE_GRANT_ALLOW, RULE_UNKNOWN_TABLE, RULE_OWNER_ALLOW
+from datagov.access import RULE_DEFAULT_DENY, RULE_GRANT_ALLOW, RULE_OWNER_ALLOW, RULE_UNKNOWN_TABLE
 
 
 def make_catalog(audit=None):
@@ -156,12 +164,55 @@ def test_deny_hides_column():
 
 def test_hash_policy_is_deterministic_and_opaque():
     cat = make_catalog()
-    eng = MaskingEngine(cat)
+    eng = MaskingEngine(cat, pseudonym_key="T" * 24)
     eng.set_policy("prod.sales.customers", "email", "analyst", "hash")
     r1 = eng.apply("prod.sales.customers", [{"email": "ann@example.com"}], role="analyst")
     r2 = eng.apply("prod.sales.customers", [{"email": "ann@example.com"}], role="analyst")
     assert r1[0]["email"] == r2[0]["email"]
     assert "ann@example.com" not in r1[0]["email"]
+
+
+def _hash_engine(key, key_id="v1"):
+    eng = MaskingEngine(make_catalog(), pseudonym_key=key, key_id=key_id)
+    eng.set_policy("prod.sales.customers", "email", "analyst", "hash")
+    return eng
+
+
+def test_hash_is_keyed_hmac_not_plain_sha256():
+    import hashlib
+    out = _hash_engine("key-A-0123456789abcdef").apply(
+        "prod.sales.customers", [{"email": "ann@example.com"}], role="analyst")[0]["email"]
+    assert out.startswith("hmac:v1:")
+    plain = hashlib.sha256(b"email:ann@example.com").hexdigest()
+    assert plain[:16] not in out  # a dictionary attack on plain SHA-256 no longer matches
+
+
+def test_different_keys_give_different_pseudonyms():
+    rows = [{"email": "ann@example.com"}]
+    a = _hash_engine("key-A-0123456789abcdef").apply("prod.sales.customers", rows, role="analyst")
+    b = _hash_engine("key-B-0123456789abcdef", "v2").apply("prod.sales.customers", rows, role="analyst")
+    assert a[0]["email"] != b[0]["email"]
+    assert b[0]["email"].startswith("hmac:v2:")
+
+
+def test_hash_without_key_fails_closed(monkeypatch):
+    monkeypatch.delenv("DATAGOV_PSEUDONYM_KEY", raising=False)
+    eng = _hash_engine(None)
+    with pytest.raises(MaskingError):
+        eng.apply("prod.sales.customers", [{"email": "ann@example.com"}], role="analyst")
+
+
+def test_key_read_from_environment(monkeypatch):
+    monkeypatch.setenv("DATAGOV_PSEUDONYM_KEY", "E" * 24)
+    monkeypatch.setenv("DATAGOV_PSEUDONYM_KEY_ID", "2026-10")
+    out = _hash_engine(None, key_id=None).apply(
+        "prod.sales.customers", [{"email": "ann@example.com"}], role="analyst")
+    assert out[0]["email"].startswith("hmac:2026-10:")
+
+
+def test_short_key_rejected():
+    with pytest.raises(MaskingError):
+        MaskingEngine(make_catalog(), pseudonym_key="short")
 
 
 def test_unmasked_pii_access_logged_as_sensitive():

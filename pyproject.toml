@@ -1,7 +1,7 @@
 [project]
 name = "datagov"
 version = "0.1.0"
-description = "Unity Catalog-style data governance: catalog, RBAC, PII masking, lineage, audit"
+description = "Catalog-style data governance: catalog, RBAC, PII masking, lineage, audit"
 readme = "README.md"
 requires-python = ">=3.9"
 
@@ -11,3 +11,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["datagov"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "B"]
+ignore = ["E741", "B905"]

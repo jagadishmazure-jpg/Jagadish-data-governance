@@ -3,19 +3,29 @@
 Access control decides *whether* you may read a table; masking decides *what*
 you may see inside it. Sensitive columns are transformed per role according to
 a declared policy: full (cleartext), partial (e.g. e***@***), hash
-(deterministic SHA-256 prefix, joinable but not reversible), or deny (column
-removed entirely).
+(keyed HMAC-SHA256 pseudonym: joinable, and not reversible without the key),
+or deny (column removed entirely).
+
+Why keyed: a plain SHA-256 of an email can be reversed by hashing a list of
+likely emails and comparing. HMAC with a secret key that never leaves the
+governance layer stops that. The key comes from the environment
+(``DATAGOV_PSEUDONYM_KEY``, with an optional ``DATAGOV_PSEUDONYM_KEY_ID``) or is
+passed in explicitly; if a ``hash`` policy is used with no key, masking fails
+closed. Pseudonyms carry the key ID (``hmac:v1:...``) so a key rotation is
+visible in the data. See docs/governance-model.md for the rotation procedure.
 
 Every unmasked (full) read of a PII column is logged as sensitive — auditors
 can see exactly who saw cleartext PII and when.
 """
 
 import hashlib
+import hmac
+import os
 
 # Masking policy kinds.
 FULL = "full"        # cleartext
-PARTIAL = "partial"  # e.g. j***@example.com
-HASH = "hash"        # deterministic, non-reversible
+PARTIAL = "partial"  # first character kept, e.g. a***@***
+HASH = "hash"        # keyed HMAC-SHA256 pseudonym
 DENY = "deny"        # column removed
 
 _POLICIES = (FULL, PARTIAL, HASH, DENY)
@@ -44,9 +54,18 @@ class MaskingEngine:
     Roles without an explicit entry fall back to ``default_policy``.
     """
 
-    def __init__(self, catalog, audit_log=None, default_policy=DENY):
+    def __init__(self, catalog, audit_log=None, default_policy=DENY,
+                 pseudonym_key=None, key_id=None):
         if default_policy not in _POLICIES:
             raise MaskingError(f"Invalid default policy: {default_policy}")
+        if pseudonym_key is None:
+            pseudonym_key = os.environ.get("DATAGOV_PSEUDONYM_KEY")
+        if isinstance(pseudonym_key, str):
+            pseudonym_key = pseudonym_key.encode("utf-8")
+        if pseudonym_key is not None and len(pseudonym_key) < 16:
+            raise MaskingError("Pseudonym key must be at least 16 bytes")
+        self._key = pseudonym_key
+        self.key_id = key_id or os.environ.get("DATAGOV_PSEUDONYM_KEY_ID", "v1")
         self._catalog = catalog
         self._policies = {}
         self._audit = audit_log
@@ -72,8 +91,13 @@ class MaskingEngine:
         if kind == DENY:
             return None  # caller drops the column
         if kind == HASH:
-            digest = hashlib.sha256(f"{column}:{value}".encode("utf-8")).hexdigest()
-            return f"hash:{digest[:12]}"
+            if self._key is None:
+                raise MaskingError(
+                    "hash policy needs a pseudonym key: set DATAGOV_PSEUDONYM_KEY "
+                    "or pass pseudonym_key=")
+            digest = hmac.new(self._key, f"{column}:{value}".encode("utf-8"),
+                              hashlib.sha256).hexdigest()
+            return f"hmac:{self.key_id}:{digest[:16]}"
         if kind == PARTIAL:
             s = str(value)
             if column == "email" or "@" in s:

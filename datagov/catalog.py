@@ -1,6 +1,6 @@
 """Centralized table catalog.
 
-Three-level namespace: ``catalog.schema.table`` — the Unity Catalog shape.
+Three-level namespace: ``catalog.schema.table`` — the shape most lakehouse catalogs use.
 Tables carry ownership, column metadata, and PII annotations so downstream
 governance (access control, masking) can act on declared facts rather than
 guesses.
@@ -72,7 +72,7 @@ class Catalog:
         try:
             return self._tables[full_name]
         except KeyError:
-            raise CatalogError(f"Unknown table: {full_name}")
+            raise CatalogError(f"Unknown table: {full_name}") from None
 
     def has_table(self, full_name):
         return full_name in self._tables
